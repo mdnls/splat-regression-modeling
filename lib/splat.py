@@ -11,6 +11,7 @@ from flax import linen as nn
 from jaxkan.KAN import KAN
 from tqdm import tqdm
 
+@jax.jit
 def eval_splat(X, splatnn, rho=None, eps=1e-6):
     '''
     X: [n,d] real tensor
@@ -88,6 +89,7 @@ def eval_splat(X, splatnn, rho=None, eps=1e-6):
 
     return Y
 
+@jax.jit
 def eval_splat_grad(splatnn, X, Y, variation, rho=None, eps=1e-9, sgd=False):
     '''
     
@@ -358,6 +360,7 @@ def splat_anim_2d(splatnns, f, xlim=[-1,1], ylim=[-1,1], Ngrid=50, interval=100,
     anim = FuncAnimation(fig, animate, frames=list(range(N))[::fskip], interval=interval, blit=False)
     return anim
 
+@jax.jit
 def gd_splat_regression(init_splat, train_X, train_Y, lr=1e-4, num_steps=1000, train_mask=(1.0,1.0,1.0), verbose=False, adam=False, adam_params=(0.9,0.999,1e-8), selective_noise=None): 
     splats = []
     train_mask = jnp.array(train_mask).astype(float)
