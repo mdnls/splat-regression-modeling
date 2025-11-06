@@ -20,6 +20,10 @@ from pathlib import Path
 print(f"JAX devices: {jax.devices()}")
 print(f"JAX default backend: {jax.default_backend()}")
 
+# Configure JAX for optimal GPU performance
+jax.config.update('jax_enable_x64', False)  # Use float32 for better GPU performance
+jax.config.update('jax_platform_name', 'gpu')  # Force GPU usage
+
 # Import model functions from existing files
 from lib.splat import eval_splat, gd_splat_regression
 from lib.nets import gd_net_regression
@@ -30,6 +34,27 @@ def compute_mse(y_pred, y_true):
     """Compute mean squared error between predictions and true values."""
     return jnp.mean((y_pred - y_true)**2)
 
+def warmup_gpu():
+    """Warm up GPU by running a dummy computation to force compilation."""
+    print("Warming up GPU...")
+    key = jr.PRNGKey(42)
+    
+    # Dummy operations to warm up GPU
+    dummy_data = jr.normal(key, (1000, 10))
+    dummy_target = jr.normal(key, (1000, 1))
+    
+    # Force compilation and GPU memory allocation
+    _ = compute_mse(dummy_data[:, :1], dummy_target)
+    _ = jnp.dot(dummy_data, dummy_data.T)
+    _ = jax.nn.relu(dummy_data)
+    _ = jnp.sin(dummy_data)
+    _ = jnp.cos(dummy_data)
+    
+    # Block until computation is complete
+    _.block_until_ready()
+    print("GPU warmup complete.")
+
+@jax.jit
 def generate_data(key, n_samples, function, input_dim, noise_level):
     """
     Generate data for regression task.
@@ -48,6 +73,7 @@ def generate_data(key, n_samples, function, input_dim, noise_level):
     Y = Y_true + noise
     
     return X, Y
+
 
 def train_and_evaluate_splat(init_splat, train_X, train_Y, test_X, test_Y, 
                            num_steps, lr, adam, validation_interval):
@@ -73,10 +99,21 @@ def train_and_evaluate_splat(init_splat, train_X, train_Y, test_X, test_Y,
         lr=lr, num_steps=num_steps, adam=adam, verbose=True
     )
     
-    # Compute training loss at each step
+    # Compute training loss at each step (vectorized for efficiency)
+    @jax.jit
+    def compute_all_losses(trajectory_params, x, y):
+        """Compute losses for entire trajectory at once."""
+        losses = []
+        for params in trajectory_params:
+            y_pred = eval_splat(x, params)
+            loss = compute_mse(y_pred, y)
+            losses.append(loss)
+        return jnp.array(losses)
+    
     train_losses = []
     for params in splat_trajectory:
         loss = compute_loss(params, train_X, train_Y)
+        loss.block_until_ready()  # Ensure computation completes
         train_losses.append(float(loss))
     
     # Compute validation MSE at specified intervals
@@ -84,12 +121,18 @@ def train_and_evaluate_splat(init_splat, train_X, train_Y, test_X, test_Y,
     if (num_steps-1) not in val_steps:
         val_steps.append(num_steps-1)
     
+    @jax.jit
+    def compute_validation_mse(params, x, y):
+        """Compute validation MSE for given parameters."""
+        y_pred = evaluate_model(params, x)
+        return compute_mse(y_pred, y)
+    
     val_mse = []
     for step in val_steps:
         params = splat_trajectory[step]
-        y_pred = evaluate_model(params, test_X)
-        mse = float(compute_mse(y_pred, test_Y))
-        val_mse.append(mse)
+        mse = compute_validation_mse(params, test_X, test_Y)
+        mse.block_until_ready()  # Ensure computation completes
+        val_mse.append(float(mse))
     
     end_time = time.time()
     wall_time = end_time - start_time
@@ -139,12 +182,17 @@ def train_and_evaluate_nn_model(model, train_X, train_Y, test_X, test_Y,
     for step in R:
         grads = grad_fn(model)
         optimizer.update(model, grads)
-        R.set_description(f"Training {'KAN' if 'KAN' in str(type(model)) else 'MLP'} – log(MSE) = {jnp.log10(loss_fn(model)):.4f}")
+        
+        # Force computation to complete and update progress
+        current_loss = loss_fn(model)
+        current_loss.block_until_ready()
+        R.set_description(f"Training {'KAN' if 'KAN' in str(type(model)) else 'MLP'} – log(MSE) = {jnp.log10(current_loss):.4f}")
         
         # Validate at specified intervals
         if step % validation_interval == 0 or step == num_steps - 1:
             val_steps.append(step)
             test_pred = evaluate_model(model, test_X)
+            test_pred.block_until_ready()  # Ensure computation completes
             test_loss = float(compute_mse(test_pred, test_Y))
             val_mse.append(test_loss)
     
@@ -229,9 +277,19 @@ def run_regression_comparison(
     key = jr.PRNGKey(seed)
     key_train, key_test = jr.split(key)
     
-    # Generate data
+    # Generate data and ensure it's on GPU
     train_X, train_Y = generate_data(key_train, train_size, function, input_dim, noise_level)
     test_X, test_Y = generate_data(key_test, test_size, function, input_dim, noise_level)
+    
+    # Force data to GPU by calling a JIT function that returns the same data
+    @jax.jit
+    def ensure_gpu_data(x, y):
+        return x, y
+    
+    train_X, train_Y = ensure_gpu_data(train_X, train_Y)
+    test_X, test_Y = ensure_gpu_data(test_X, test_Y)
+    
+    print(f"Data moved to device: {train_X.device()}")
     
     # Initialize results dictionary
     results = {
@@ -568,7 +626,8 @@ def example_usage(load_from=None, name=None, seed=42):
     name = name
     snapshot_file = f"logs/regression_{function_name}_{name}_key={seed}_{timestamp}.pkl"
     
-
+    # Warm up GPU for optimal performance
+    warmup_gpu()
 
     
     train_size = 1000

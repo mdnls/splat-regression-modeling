@@ -11,7 +11,7 @@ from flax import linen as nn
 from jaxkan.KAN import KAN
 from tqdm import tqdm
 
-
+@jax.jit
 def eval_splat(X, splatnn, rho=None, eps=1e-6):
     '''
     X: [n,d] real tensor
@@ -88,9 +88,8 @@ def eval_splat(X, splatnn, rho=None, eps=1e-6):
     Y = jnp.dot(rho_transformed, V)
 
     return Y
-jax.jit(eval_splat, static_argnames=["rho", "eps"])
 
-
+@jax.jit
 def eval_splat_grad(splatnn, X, Y, variation, rho=None, eps=1e-9, sgd=False):
     '''
     
@@ -170,8 +169,6 @@ def eval_splat_grad(splatnn, X, Y, variation, rho=None, eps=1e-9, sgd=False):
     grad_B = -jnp.einsum('ij,ij,ijk->jk', rho_transformed, vdFx, grad_log_s)
  
     return grad_V, grad_A, grad_B
-jax.jit(eval_splat_grad, static_argnames=["rho", "eps", "sgd"])
-
 
 def splat_anim_1d(splatnns, f, train_X, train_Y, xlim=[-1,1], Ngrid=50, interval=100, fskip=1, db=False): 
     '''
@@ -427,7 +424,8 @@ def gd_splat_regression(init_splat, train_X, train_Y, lr=1e-4, num_steps=1000, t
         R.set_description(f"Training SRM – log(MSE) = {jnp.log10(loss):.4f}")
     return splats
 
-jax.jit(gd_splat_regression,static_argnames=["lr", "num_steps", "train_mask", "verbose","adam", "adam_params", "selective_noise"])
+# Note: gd_splat_regression cannot be fully JIT compiled due to Python control flow
+# The JIT decoration is removed to avoid compilation errors
 
 if __name__ == "__main__":
     """
