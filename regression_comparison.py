@@ -16,9 +16,19 @@ import pickle
 from datetime import datetime
 from pathlib import Path
 
+# Configure JAX for GPU usage
+print(f"JAX devices: {jax.devices()}")
+print(f"JAX default backend: {jax.default_backend()}")
+
 # Import model functions from existing files
 from lib.splat import eval_splat, gd_splat_regression
 from lib.nets import gd_net_regression
+
+# JIT-compiled utility functions for efficiency
+@jax.jit
+def compute_mse(y_pred, y_true):
+    """Compute mean squared error between predictions and true values."""
+    return jnp.mean((y_pred - y_true)**2)
 
 def generate_data(key, n_samples, function, input_dim, noise_level):
     """
@@ -46,10 +56,16 @@ def train_and_evaluate_splat(init_splat, train_X, train_Y, test_X, test_Y,
     """
     start_time = time.time()
     
-    # Define a function to compute training loss
+    # Define a JIT-compiled function to compute training loss
+    @jax.jit
     def compute_loss(params, x, y):
         y_pred = eval_splat(x, params)
-        return jnp.mean((y_pred - y)**2)
+        return compute_mse(y_pred, y)
+    
+    # JIT-compiled evaluation function
+    @jax.jit 
+    def evaluate_model(params, x):
+        return eval_splat(x, params)
     
     # Train the model
     splat_trajectory = gd_splat_regression(
@@ -71,8 +87,8 @@ def train_and_evaluate_splat(init_splat, train_X, train_Y, test_X, test_Y,
     val_mse = []
     for step in val_steps:
         params = splat_trajectory[step]
-        y_pred = eval_splat(test_X, params)
-        mse = float(jnp.mean((y_pred - test_Y)**2))
+        y_pred = evaluate_model(params, test_X)
+        mse = float(compute_mse(y_pred, test_Y))
         val_mse.append(mse)
     
     end_time = time.time()
@@ -108,7 +124,12 @@ def train_and_evaluate_nn_model(model, train_X, train_Y, test_X, test_Y,
     @jax.jit
     def loss_fn(kan_model):
         y_pred = kan_model(train_X)
-        return jnp.mean((y_pred - train_Y)**2)
+        return compute_mse(y_pred, train_Y)
+    
+    # JIT-compiled evaluation function
+    @jax.jit
+    def evaluate_model(model, x):
+        return model(x)
 
     grad_fn = nnx.grad(loss_fn)
     R = tqdm(range(num_steps), desc=f"Training {'KAN' if 'KAN' in str(type(model)) else 'MLP'}")
@@ -123,8 +144,8 @@ def train_and_evaluate_nn_model(model, train_X, train_Y, test_X, test_Y,
         # Validate at specified intervals
         if step % validation_interval == 0 or step == num_steps - 1:
             val_steps.append(step)
-            test_pred = model(test_X)
-            test_loss = float(jnp.mean((test_pred - test_Y)**2))
+            test_pred = evaluate_model(model, test_X)
+            test_loss = float(compute_mse(test_pred, test_Y))
             val_mse.append(test_loss)
     
     end_time = time.time()
@@ -472,6 +493,7 @@ def example_usage(load_from=None, name=None, seed=42):
     key1, key2, key3 = jr.split(key, 3)
     
     # Define function to fit (example: sine function with two inputs)
+    @jax.jit
     def target_function(X):
         return jnp.sin(3 * jnp.pi * jnp.sqrt(X[:, 0:1])) * jnp.cos(3 * jnp.pi * X[:, 1:2])
     
